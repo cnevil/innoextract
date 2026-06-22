@@ -67,6 +67,9 @@ struct extract_options {
 	bool gog_game_id; //!< Show the GOG.com game id
 	bool show_password; //!< Show password check information
 	bool check_password; //!< Abort if the provided password is incorrect
+	bool dump_code; //!< Dump the compiled [Code] script
+	bool auto_password; //!< Recover the password from the compiled [Code] script
+	std::string report; //!< Write a JSON report about the installer to this file
 	
 	bool preserve_file_times; //!< Set timestamps of extracted files
 	bool local_timestamps; //!< Use local timezone for setting timestamps
@@ -105,6 +108,8 @@ struct extract_options {
 		, gog_game_id(false)
 		, show_password(false)
 		, check_password(false)
+		, dump_code(false)
+		, auto_password(false)
 		, preserve_file_times(false)
 		, local_timestamps(false)
 		, gog(false)

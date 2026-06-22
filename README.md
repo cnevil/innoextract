@@ -32,8 +32,23 @@ that parses cleanly. The declared version is still reported as a warning, so spo
 rather than fatal. Genuine, known-version installers are unaffected and take the original code path.
 
 This is useful for malware analysis and digital forensics, where deliberately obfuscated Inno
-Setup installers are common. Extraction of encrypted installers still requires the correct
-`--password`.
+Setup installers are common.
+
+### Incident-response options
+
+This fork adds a few options aimed at triaging malicious Inno Setup installers without ever
+running them:
+
+* `--dump-code` — write the compiled `[Code]` (Pascal Script) bytecode to a file. Embedded
+  passwords, C2 URLs, dropped paths and anti-analysis logic typically live here; upstream parses
+  this block but discards it.
+* `--auto-password` — recover the encryption password automatically by testing every string
+  constant embedded in the `[Code]` script against the installer's stored key-check value. Many
+  installers encrypt their payload only to obstruct unpackers while keeping the password baked into
+  their own script, so this often decrypts them with no manual work.
+* `--report FILE` — write a JSON report (app identity, real vs. declared version, encryption
+  status and recovered password, dropped file paths with sizes, `[Run]` entries) for ingestion into
+  automated triage pipelines.
 
 ## Contact
 

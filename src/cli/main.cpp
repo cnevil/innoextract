@@ -140,6 +140,8 @@ int main(int argc, char * argv[]) {
 		("gog-game-id", "Determine the installer's GOG.com game ID")
 		("show-password", "Show password check information")
 		("check-password", "Abort if the password is incorrect")
+		("dump-code", "Dump the compiled [Code] script")
+		("report", po::value<std::string>(), "Write a JSON report about the installer to this file")
 		("data-version,V", "Only print the data version")
 		#ifdef DEBUG
 		("dump-headers", "Dump decompressed setup headers")
@@ -157,6 +159,7 @@ int main(int argc, char * argv[]) {
 		("output-dir,d", po::value<std::string>(), "Extract files into the given directory")
 		("password,P", po::value<std::string>(), "Password for encrypted files")
 		("password-file", po::value<std::string>(), "File to load password from")
+		("auto-password", "Recover the password from the compiled [Code] script")
 		("gog,g", "Extract additional archives from GOG.com installers")
 		("no-gog-galaxy", "Don't re-assemble GOG Galaxy file parts")
 		("no-extract-unknown,n", "Don't extract unknown Inno Setup versions")
@@ -264,13 +267,22 @@ int main(int argc, char * argv[]) {
 	o.gog_game_id = (options.count("gog-game-id") != 0);
 	o.show_password = (options.count("show-password") != 0);
 	o.check_password = (options.count("check-password") != 0);
+	o.dump_code = (options.count("dump-code") != 0);
+	o.auto_password = (options.count("auto-password") != 0);
+	{
+		po::variables_map::const_iterator i = options.find("report");
+		if(i != options.end()) {
+			o.report = i->second.as<std::string>();
+		}
+	}
 	if(options.count("info") != 0) {
 		o.list_languages = true;
 		o.gog_game_id = true;
 		o.show_password = true;
 	}
 	bool explicit_action = o.list || o.test || o.extract || o.list_languages
-	                       || o.gog_game_id || o.show_password || o.check_password;
+	                       || o.gog_game_id || o.show_password || o.check_password
+	                       || o.dump_code || !o.report.empty();
 	if(!explicit_action) {
 		o.extract = true;
 	}
@@ -414,7 +426,7 @@ int main(int argc, char * argv[]) {
 				return ExitDataError;
 			}
 		}
-		if(o.check_password && o.password.empty()) {
+		if(o.check_password && o.password.empty() && !o.auto_password) {
 			log_error << "Combining --check-password requires a password";
 			return ExitUserError;
 		}

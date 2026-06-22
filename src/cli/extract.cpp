@@ -22,9 +22,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <set>
 #include <sstream>
 #include <vector>
 #include <limits>
@@ -59,6 +62,7 @@
 #include "setup/file.hpp"
 #include "setup/info.hpp"
 #include "setup/language.hpp"
+#include "setup/run.hpp"
 
 #include "stream/chunk.hpp"
 #include "stream/file.hpp"
@@ -619,6 +623,235 @@ void rename_collisions(const extract_options & o, FilesMap & processed_files,
 	}
 }
 
+//! Collect printable ASCII and UTF-16LE string constants from a binary blob.
+void collect_strings(const std::string & blob, std::vector<std::string> & out, size_t min_len) {
+	// ASCII runs
+	{
+		std::string cur;
+		for(size_t i = 0; i < blob.size(); i++) {
+			unsigned char c = static_cast<unsigned char>(blob[i]);
+			if(c >= 0x20 && c < 0x7f) {
+				cur.push_back(static_cast<char>(c));
+			} else {
+				if(cur.size() >= min_len) { out.push_back(cur); }
+				cur.clear();
+			}
+		}
+		if(cur.size() >= min_len) { out.push_back(cur); }
+	}
+	// UTF-16LE runs, testing both byte alignments
+	for(size_t start = 0; start < 2; start++) {
+		std::string cur;
+		for(size_t i = start; i + 1 < blob.size(); i += 2) {
+			unsigned char lo = static_cast<unsigned char>(blob[i]);
+			unsigned char hi = static_cast<unsigned char>(blob[i + 1]);
+			if(hi == 0 && lo >= 0x20 && lo < 0x7f) {
+				cur.push_back(static_cast<char>(lo));
+			} else {
+				if(cur.size() >= min_len) { out.push_back(cur); }
+				cur.clear();
+			}
+		}
+		if(cur.size() >= min_len) { out.push_back(cur); }
+	}
+}
+
+//! Try to recover the encryption password from the compiled [Code] script by testing each
+//! embedded string constant against the stored key check value.
+std::string recover_password(setup::info & info) {
+#if INNOEXTRACT_HAVE_DECRYPTION
+	if(info.header.compiled_code.empty()) {
+		return std::string();
+	}
+	std::vector<std::string> candidates;
+	collect_strings(info.header.compiled_code, candidates, 4);
+	std::set<std::string> seen;
+	BOOST_FOREACH(const std::string & candidate, candidates) {
+		if(!seen.insert(candidate).second) {
+			continue;
+		}
+		try {
+			if(info.check_key(info.get_key(candidate))) {
+				return candidate;
+			}
+		} catch(...) {
+			// Wrong size or unsupported scheme - skip this candidate
+		}
+	}
+#else
+	(void)info;
+#endif
+	return std::string();
+}
+
+//! Write the raw compiled [Code] bytecode to a file for analysis.
+void dump_compiled_code(const extract_options & o, const fs::path & installer,
+                        const setup::info & info) {
+	if(info.header.compiled_code.empty()) {
+		log_warning << "Installer contains no compiled [Code] script to dump";
+		return;
+	}
+	fs::path file = installer.stem();
+	file += ".code.bin";
+	if(!o.output_dir.empty()) {
+		if(!fs::exists(o.output_dir)) {
+			fs::create_directories(o.output_dir);
+		}
+		file = o.output_dir / file;
+	}
+	std::ofstream ofs(file.string().c_str(), std::ios::binary);
+	if(!ofs.is_open()) {
+		log_error << "Could not open \"" << file.string() << "\" for writing";
+		return;
+	}
+	ofs.write(info.header.compiled_code.data(),
+	          std::streamsize(info.header.compiled_code.size()));
+	if(!o.silent) {
+		log_info << "Dumped compiled [Code] script (" << info.header.compiled_code.size()
+		         << " bytes) to " << file.string();
+	}
+}
+
+std::string json_escape(const std::string & s) {
+	std::string r;
+	r.reserve(s.size() + 2);
+	BOOST_FOREACH(char ch, s) {
+		unsigned char c = static_cast<unsigned char>(ch);
+		switch(ch) {
+			case '"':  r += "\\\""; break;
+			case '\\': r += "\\\\"; break;
+			case '\b': r += "\\b"; break;
+			case '\f': r += "\\f"; break;
+			case '\n': r += "\\n"; break;
+			case '\r': r += "\\r"; break;
+			case '\t': r += "\\t"; break;
+			default:
+				if(c < 0x20) {
+					char buf[8];
+					std::sprintf(buf, "\\u%04x", static_cast<unsigned>(c));
+					r += buf;
+				} else {
+					r += ch;
+				}
+		}
+	}
+	return r;
+}
+
+std::string jstr(const std::string & s) {
+	return "\"" + json_escape(s) + "\"";
+}
+
+std::string checksum_type_name(crypto::checksum_type type) {
+	switch(type) {
+		case crypto::Adler32: return "adler32";
+		case crypto::CRC32:   return "crc32";
+		case crypto::MD5:     return "md5";
+		case crypto::SHA1:    return "sha1";
+		case crypto::SHA256:  return "sha256";
+		default:              return "none";
+	}
+}
+
+std::string checksum_hex(const crypto::checksum & c) {
+	const char * data = NULL;
+	size_t n = 0;
+	switch(c.type) {
+		case crypto::MD5:    data = c.md5;    n = 16; break;
+		case crypto::SHA1:   data = c.sha1;   n = 20; break;
+		case crypto::SHA256: data = c.sha256; n = 32; break;
+		default: return std::string();
+	}
+	static const char hex[] = "0123456789abcdef";
+	std::string r;
+	r.reserve(n * 2);
+	for(size_t i = 0; i < n; i++) {
+		unsigned char b = static_cast<unsigned char>(data[i]);
+		r.push_back(hex[b >> 4]);
+		r.push_back(hex[b & 0xf]);
+	}
+	return r;
+}
+
+//! Write a JSON report describing the installer, for incident-response triage.
+void write_report(const std::string & path, const setup::info & info,
+                  const std::string & password, bool password_ok) {
+	
+	std::ofstream os(path.c_str(), std::ios::binary);
+	if(!os.is_open()) {
+		log_error << "Could not open report file \"" << path << '"';
+		return;
+	}
+	
+	const setup::header & h = info.header;
+	bool encryption = !!(h.options & setup::header::EncryptionUsed);
+	
+	std::ostringstream version;
+	version << info.version;
+	
+	os << "{\n";
+	os << "  \"detected_version\": " << jstr(version.str()) << ",\n";
+	os << "  \"app_name\": " << jstr(h.app_name) << ",\n";
+	os << "  \"app_versioned_name\": " << jstr(h.app_versioned_name) << ",\n";
+	os << "  \"app_id\": " << jstr(h.app_id) << ",\n";
+	os << "  \"app_version\": " << jstr(h.app_version) << ",\n";
+	os << "  \"app_publisher\": " << jstr(h.app_publisher) << ",\n";
+	os << "  \"default_dir_name\": " << jstr(h.default_dir_name) << ",\n";
+	os << "  \"setup_mutex\": " << jstr(h.setup_mutex) << ",\n";
+	os << "  \"app_mutex\": " << jstr(h.app_mutex) << ",\n";
+	os << "  \"compiled_code_size\": " << h.compiled_code.size() << ",\n";
+	
+	os << "  \"encryption\": {\n";
+	os << "    \"used\": " << (encryption ? "true" : "false") << ",\n";
+	os << "    \"recovered\": "
+	   << ((encryption && password_ok && !password.empty()) ? "true" : "false") << ",\n";
+	os << "    \"password\": "
+	   << ((password_ok && !password.empty()) ? jstr(password) : std::string("null")) << "\n";
+	os << "  },\n";
+	
+	os << "  \"files\": [\n";
+	for(size_t i = 0; i < info.files.size(); i++) {
+		const setup::file_entry & f = info.files[i];
+		bool fenc = false;
+		boost::uint64_t size = f.size;
+		if(f.location < info.data_entries.size()) {
+			const setup::data_entry & d = info.data_entries[f.location];
+			fenc = !!(d.options & setup::data_entry::ChunkEncrypted);
+			if(d.file.size) {
+				size = d.file.size;
+			} else if(d.uncompressed_size) {
+				size = d.uncompressed_size;
+			}
+		}
+		std::string name = f.destination.empty() ? f.source : f.destination;
+		std::string sum = checksum_hex(f.checksum);
+		os << "    { \"name\": " << jstr(name)
+		   << ", \"size\": " << size
+		   << ", \"encrypted\": " << (fenc ? "true" : "false")
+		   << ", \"checksum_type\": " << jstr(checksum_type_name(f.checksum.type))
+		   << ", \"checksum\": " << (sum.empty() ? std::string("null") : jstr(sum))
+		   << " }" << (i + 1 < info.files.size() ? "," : "") << "\n";
+	}
+	os << "  ],\n";
+	
+	os << "  \"run\": [\n";
+	for(size_t i = 0; i < info.run_entries.size(); i++) {
+		const setup::run_entry & r = info.run_entries[i];
+		os << "    { \"name\": " << jstr(r.name)
+		   << ", \"parameters\": " << jstr(r.parameters)
+		   << ", \"working_dir\": " << jstr(r.working_dir)
+		   << ", \"verb\": " << jstr(r.verb)
+		   << " }" << (i + 1 < info.run_entries.size() ? "," : "") << "\n";
+	}
+	os << "  ]\n";
+	
+	os << "}\n";
+	
+	if(!os) {
+		log_error << "Error writing report file \"" << path << '"';
+	}
+}
+
 bool print_file_info(const extract_options & o, const setup::info & info) {
 	
 	if(!o.quiet) {
@@ -1019,26 +1252,49 @@ void process_file(const fs::path & installer, const extract_options & o) {
 	
 	bool multiple_sections = print_file_info(o, info);
 	
+	std::string password = o.password;
+	bool password_ok = false;
+	if(password.empty() && o.auto_password
+	   && (info.header.options & setup::header::EncryptionUsed)) {
+		password = recover_password(info);
+		if(!password.empty()) {
+			log_info << "Recovered password from [Code] script: "
+			         << color::green << password << color::reset;
+		} else {
+			log_warning << "Could not recover the password from the compiled [Code] script";
+		}
+	}
+	
 	std::string key;
-	if(o.password.empty()) {
+	if(password.empty()) {
 		if(!o.quiet && (o.list || o.test || o.extract) && (info.header.options & setup::header::EncryptionUsed)) {
-			log_warning << "Setup contains encrypted files, use the --password option to extract them";
+			log_warning << "Setup contains encrypted files, use the --password or --auto-password option to extract them";
 		}
 	} else {
-		key = info.get_key(o.password);
+		key = info.get_key(password);
 		if((info.header.options & setup::header::Password) && !info.check_key(key)) {
 			if(o.check_password) {
 				throw std::runtime_error("Incorrect password provided");
 			}
 			log_error << "Incorrect password provided";
 			key.clear();
+		} else {
+			password_ok = true;
 		}
 		#if !INNOEXTRACT_HAVE_DECRYPTION
 		if((o.extract || o.test) && (info.header.options & setup::header::EncryptionUsed)) {
 			log_warning << "Decryption not supported in this build, skipping compressed chunks";
 		}
 		key.clear();
+		password_ok = false;
 		#endif
+	}
+	
+	if(o.dump_code) {
+		dump_compiled_code(o, installer, info);
+	}
+	if(!o.report.empty()) {
+		write_report(o.report, info, password, password_ok);
 	}
 	
 	if(!o.list && !o.test && !o.extract) {
