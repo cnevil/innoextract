@@ -28,6 +28,7 @@
 
 #include <iosfwd>
 #include <exception>
+#include <cstddef>
 
 #include <boost/cstdint.hpp>
 
@@ -89,6 +90,12 @@ struct version {
 	}
 	
 	version_constant next();
+	
+	//! Override \ref value and \ref variant with the n-th known data format, newest first.
+	//! Used to recover installers whose version string is unknown or has been deliberately
+	//! spoofed (wrong number and/or missing "(u)" marker) to defeat extraction tools.
+	//! \return false once all known formats have been tried.
+	bool set_format(std::size_t n);
 	
 };
 

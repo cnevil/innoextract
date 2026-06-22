@@ -1,6 +1,13 @@
 
 # innoextract - A tool to unpack installers created by Inno Setup
 
+> **Fork notice:** This is a fork of [innoextract](https://github.com/dscharrer/innoextract)
+> by Daniel Scharrer. It adds **content-based detection of spoofed version headers**: when an
+> installer reports an unknown or deliberately faked version string (a wrong number and/or a
+> missing `(u)` Unicode marker, a trick used to defeat extraction tools), innoextract now probes
+> every known data format and uses the one that actually parses, instead of failing with a stream
+> error. See [What's different in this fork](#whats-different-in-this-fork) below.
+
 [Inno Setup](https://jrsoftware.org/isinfo.php) is a tool to create installers for Microsoft Windows applications. innoextract allows to extract such installers under non-Windows systems without running the actual installer using wine. innoextract currently supports installers created by Inno Setup 1.2.10 to 6.3.3.
 
 In addition to standard Inno Setup installers, innoextract also supports some modified Inno Setup variants including Martijn Laan's My Inno Setup Extensions 1.3.10 to 3.0.6.1 as well as GOG.com's Inno Setup-based game installers. innoextract is able to unpack Wadjet Eye Games installers (to play with AGS), Arx Fatalis patches (for use with Arx Libertatis) as well as various other Inno Setup executables.
@@ -8,6 +15,25 @@ In addition to standard Inno Setup installers, innoextract also supports some mo
 innoextract is available under the ZLIB license - see the LICENSE file.
 
 See the website for [Linux packages](https://constexpr.org/innoextract/#packages).
+
+## What's different in this fork
+
+Upstream innoextract trusts the version string embedded in the installer to pick the binary
+header layout. Some installers - notably malicious ones disguised as legitimate software - **spoof
+that string** to break unpacking tools: they keep a believable but wrong version number (e.g.
+claiming `6.2.1` while the real format is `6.4.0.1`) and drop the `(u)` Unicode marker, so every
+version of innoextract applies the wrong layout and aborts with `Stream error while parsing setup
+headers!`.
+
+This fork makes format detection **content-based** when the version string is unrecognized: it
+probes every known data format (newest first), taking both the version number and the Unicode
+variant from the format definition rather than the untrusted header, and selects the first layout
+that parses cleanly. The declared version is still reported as a warning, so spoofing is visible
+rather than fatal. Genuine, known-version installers are unaffected and take the original code path.
+
+This is useful for malware analysis and digital forensics, where deliberately obfuscated Inno
+Setup installers are common. Extraction of encrypted installers still requires the correct
+`--password`.
 
 ## Contact
 

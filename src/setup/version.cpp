@@ -428,4 +428,23 @@ version_constant version::next() {
 	return 0;
 }
 
+bool version::set_format(size_t n) {
+	
+	// Probe newest formats first: installers that spoof their version string are typically
+	// based on a recent Inno Setup release, so this finds the real format in a few tries.
+	// The placeholder (empty-name) entries are deliberately included - they are real format
+	// variants that simply have no associated version string.
+	size_t total = size_t(boost::size(versions));
+	if(n >= total) {
+		return false;
+	}
+	
+	const known_version & format = versions[total - 1 - n];
+	value = format.version;
+	variant = format.variant;
+	known = false;
+	
+	return true;
+}
+
 } // namespace setup

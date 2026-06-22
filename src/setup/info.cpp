@@ -253,15 +253,24 @@ void info::load(std::istream & is, entry_types entries, util::codepage_id force_
 	}
 	
 	version_constant listed_version = version.value;
+	setup::version::flags listed_variant = version.variant;
 	
-	// Some setup versions didn't increment the data version number when they should have.
-	// To work around this, we try to parse the headers for all data versions and use the first
-	// version that parses without warnings or errors.
+	// Some setup versions didn't increment the data version number when they should have, and
+	// some installers deliberately spoof the version string - a wrong number and/or a missing
+	// "(u)" Unicode marker - to defeat extraction tools. To work around this, we try to parse
+	// the headers for all candidate data versions and use the first one that parses without
+	// warnings or errors.
 	bool ambiguous = !version.known || version.is_ambiguous();
-	if(version.is_ambiguous()) {
+	if(ambiguous) {
 		// Force parsing all headers so that we don't miss any errors.
 		entries |= NoSkip;
 	}
+	
+	// When the version string is not recognized, neither its number nor its Unicode marker can
+	// be trusted, so probe every known data format (newest first) instead of only the versions
+	// reachable from the - possibly spoofed - declared version.
+	bool exhaustive = !version.known;
+	size_t probe_index = 0;
 	
 	bool parsed_without_errors = false;
 	std::streampos start = is.tellg();
@@ -278,6 +287,7 @@ void info::load(std::istream & is, entry_types entries, util::codepage_id force_
 				// Parsed without errors but with warnings - try other versions first
 				if(!parsed_without_errors) {
 					listed_version = version.value;
+					listed_variant = version.variant;
 					parsed_without_errors = true;
 				}
 				throw std::exception();
@@ -291,12 +301,23 @@ void info::load(std::istream & is, entry_types entries, util::codepage_id force_
 			is.clear();
 			is.seekg(start);
 			
-			version_constant next_version = version.next();
+			bool have_next;
+			if(exhaustive) {
+				// Probe the next known format, overriding both the number and the variant.
+				have_next = version.set_format(probe_index++);
+			} else {
+				version_constant next_version = version.next();
+				have_next = (next_version != 0);
+				if(have_next) {
+					version.value = next_version;
+				}
+			}
 			
-			if(!ambiguous || !next_version) {
-				if(version.value != listed_version) {
+			if(!ambiguous || !have_next) {
+				if(version.value != listed_version || version.variant != listed_variant) {
 					// Rewind to a previous version that had better results and report those
 					version.value = listed_version;
+					version.variant = listed_variant;
 					warnings.restore();
 					try_load(is, entries, force_codepage);
 				} else {
@@ -310,8 +331,9 @@ void info::load(std::istream & is, entry_types entries, util::codepage_id force_
 			}
 			
 			// Retry with the next version
-			version.value = next_version;
-			ambiguous = version.is_ambiguous();
+			if(!exhaustive) {
+				ambiguous = version.is_ambiguous();
+			}
 			
 		}
 		
